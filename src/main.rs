@@ -56,7 +56,7 @@ struct ListArgs {
     mode: ListMode,
 }
 
-#[derive(clap::ValueEnum, Clone, Default, Debug)]
+#[derive(clap::ValueEnum, Clone, Default, Debug, Eq, PartialEq)]
 enum ListMode {
     All,
     #[clap(name = "24h")]
@@ -118,7 +118,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     r#"SELECT name, dosage, time_taken FROM medicines ORDER BY datetime(time_taken)"#
                 }
                 ListMode::TwentyFourHours => {
-                    r#"SELECT name, dosage, time_taken FROM medicines WHERE "time_taken" >= date('now', '-1 days') ORDER BY datetime(time_taken)"#
+                    println!("Only showing the last 24h:");
+                    r#"SELECT name, dosage, time_taken FROM medicines WHERE unixepoch('now') - unixepoch(time_taken) <= 86400 ORDER BY datetime(time_taken)"#
                 }
             };
 
@@ -135,13 +136,9 @@ async fn main() -> Result<(), anyhow::Error> {
             let now = DateTime::from(Zoned::now()).round(Unit::Minute)?;
             let mut running_totals: HashMap<String, i32> = HashMap::new();
             for (name, dosage, time_taken) in medicines {
-                running_totals
-                    .entry(name.clone())
-                    .and_modify(|c| *c += dosage)
-                    .or_insert(dosage);
-
                 let time_taken = time_taken.to_jiff().round(Unit::Minute)?;
                 let elapsed_time = time_taken.since(now).unwrap();
+
                 let formtttable = time_taken.to_zoned(TimeZone::UTC)?;
                 meds_table.add_row(vec![
                     name.to_string(),
@@ -149,6 +146,11 @@ async fn main() -> Result<(), anyhow::Error> {
                     formtttable.strftime("%F at %H:%M").to_string(),
                     format!("{:#}", elapsed_time),
                 ]);
+
+                running_totals
+                    .entry(name.clone())
+                    .and_modify(|c| *c += dosage)
+                    .or_insert(dosage);
             }
 
             println!("{meds_table}");
