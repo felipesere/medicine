@@ -1,7 +1,7 @@
 -- Create the medicines table
-CREATE TABLE IF NOT EXISTS medicines (
+CREATE TABLE medicines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     dosage INTEGER NOT NULL,
-    time_taken TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    time_taken TEXT NOT NULL
+) STRICT;
