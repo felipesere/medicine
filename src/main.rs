@@ -1,11 +1,18 @@
+use std::collections::HashMap;
+use std::fmt::Display;
+
 use anyhow::Context;
+use comfy_table::modifiers::UTF8_ROUND_CORNERS;
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::{ContentArrangement, Table};
 use home::home_dir;
-use jiff::Zoned;
 use jiff::civil::{DateTime, Time};
+use jiff::tz::TimeZone;
+use jiff::{Unit, Zoned};
 use jiff_sqlx::ToSqlx;
 use sqlx::migrate::MigrateDatabase;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Executor, Sqlite, migrate::Migrator};
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::{Sqlite, migrate::Migrator};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -27,6 +34,7 @@ enum Commands {
     /// Adds a medicine entry
     Add(AddArgs),
     // Other commands could be added here, like `list`, `remove`, etc.
+    List(ListArgs),
 }
 
 #[derive(Args, Debug)]
@@ -40,6 +48,29 @@ struct AddArgs {
     /// The time when the medicine should be taken
     #[arg(long, short)]
     at: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct ListArgs {
+    #[clap(default_value_t = ListMode::TwentyFourHours)]
+    mode: ListMode,
+}
+
+#[derive(clap::ValueEnum, Clone, Default, Debug)]
+enum ListMode {
+    All,
+    #[clap(name = "24h")]
+    #[default]
+    TwentyFourHours,
+}
+
+impl Display for ListMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListMode::All => f.write_str("all"),
+            ListMode::TwentyFourHours => f.write_str("24h"),
+        }
+    }
 }
 
 #[tokio::main]
@@ -56,7 +87,7 @@ async fn main() -> Result<(), anyhow::Error> {
             Err(error) => panic!("error: {}", error),
         }
     }
-    let pool = SqlitePoolOptions::new().connect(&sqlite_db).await?;
+    let pool: SqlitePool = SqlitePoolOptions::new().connect(&sqlite_db).await?;
 
     MIGRATOR.run(&pool).await?;
 
@@ -80,6 +111,61 @@ async fn main() -> Result<(), anyhow::Error> {
             if outcome.rows_affected() != 1 {
                 println!("Failed to insert medicine");
             }
+        }
+        Commands::List(args) => {
+            let query = match args.mode {
+                ListMode::All => {
+                    r#"SELECT name, dosage, time_taken FROM medicines ORDER BY datetime(time_taken)"#
+                }
+                ListMode::TwentyFourHours => {
+                    r#"SELECT name, dosage, time_taken FROM medicines WHERE "time_taken" >= date('now', '-1 days') ORDER BY datetime(time_taken)"#
+                }
+            };
+
+            let medicines: Vec<(String, i32, jiff_sqlx::DateTime)> =
+                sqlx::query_as(query).fetch_all(&pool).await?;
+            let mut meds_table = Table::new();
+            meds_table
+                .load_preset(UTF8_FULL)
+                .apply_modifier(UTF8_ROUND_CORNERS)
+                .set_content_arrangement(ContentArrangement::Dynamic)
+                .set_width(80)
+                .set_header(vec!["Name", "Dosage", "Time Taken", "Since"]);
+
+            let now = DateTime::from(Zoned::now()).round(Unit::Minute)?;
+            let mut running_totals: HashMap<String, i32> = HashMap::new();
+            for (name, dosage, time_taken) in medicines {
+                running_totals
+                    .entry(name.clone())
+                    .and_modify(|c| *c += dosage)
+                    .or_insert(dosage);
+
+                let time_taken = time_taken.to_jiff().round(Unit::Minute)?;
+                let elapsed_time = time_taken.since(now).unwrap();
+                let formtttable = time_taken.to_zoned(TimeZone::UTC)?;
+                meds_table.add_row(vec![
+                    name.to_string(),
+                    format!("{dosage}x"),
+                    formtttable.strftime("%F at %H:%M").to_string(),
+                    format!("{:#}", elapsed_time),
+                ]);
+            }
+
+            println!("{meds_table}");
+
+            let mut totals_table = Table::new();
+            totals_table
+                .load_preset(UTF8_FULL)
+                .apply_modifier(UTF8_ROUND_CORNERS)
+                .set_content_arrangement(ContentArrangement::Dynamic)
+                .set_width(80)
+                .set_header(vec!["Name", "Total Dosage"]);
+
+            for (name, total_dosage) in running_totals {
+                totals_table.add_row(vec![name, format!("{total_dosage}")]);
+            }
+
+            println!("{totals_table}")
         }
     }
 
